@@ -2,8 +2,10 @@
 
 Async HTTP client SDK for the [mac-vendors](https://github.com/lizardsystems) public REST API.
 
-It is a thin, typed wrapper over the FastAPI backend at `{base_url}/api/v1`. Every
-endpoint maps to one async method that returns a Pydantic v2 model.
+It is a thin, typed wrapper over the hosted service at
+`https://mac-vendors.lizardsystems.com/api/v1`. The base URL is fixed (not
+configurable). Every endpoint maps to one async method that returns a
+Pydantic v2 model.
 
 ## Install
 
@@ -20,9 +22,9 @@ have:
 ```python
 from mac_vendors_sdk import MacVendorsAPI
 
-api = MacVendorsAPI("https://mac-vendors.example.com", api_key="your-api-key")
+api = MacVendorsAPI(api_key="your-api-key")
 # or
-api = MacVendorsAPI("https://mac-vendors.example.com", token="your-jwt")
+api = MacVendorsAPI(token="your-jwt")
 ```
 
 ## Usage
@@ -32,7 +34,7 @@ import asyncio
 from mac_vendors_sdk import MacVendorsAPI
 
 async def main() -> None:
-    async with MacVendorsAPI("https://mac-vendors.example.com", api_key="key") as api:
+    async with MacVendorsAPI(api_key="key") as api:
         # Single lookup
         result = await api.lookup("00:50:56:AA:BB:CC")
         print(result.vendor, result.found)
@@ -85,7 +87,7 @@ body when present), and `.response`.
 ```python
 from mac_vendors_sdk import MacVendorsAPI, NotFoundError, RateLimitError
 
-async with MacVendorsAPI("https://mac-vendors.example.com", api_key="key") as api:
+async with MacVendorsAPI(api_key="key") as api:
     try:
         await api.lookup_history("00:00:00:00:00:00")
     except NotFoundError as exc:
@@ -98,17 +100,18 @@ async with MacVendorsAPI("https://mac-vendors.example.com", api_key="key") as ap
 
 You can inject your own `httpx.AsyncClient` (for custom transports, proxies, or
 shared connection pools). When you do, you own its lifecycle and must set the
-base URL and auth headers yourself:
+base URL (`https://mac-vendors.lizardsystems.com/api/v1`) and auth headers
+yourself:
 
 ```python
 import httpx
 from mac_vendors_sdk import MacVendorsAPI
 
 client = httpx.AsyncClient(
-    base_url="https://mac-vendors.example.com/api/v1",
+    base_url="https://mac-vendors.lizardsystems.com/api/v1",
     headers={"X-API-Key": "key"},
 )
-api = MacVendorsAPI("https://mac-vendors.example.com", client=client)
+api = MacVendorsAPI(client=client)
 # api.aclose() will NOT close an injected client.
 ```
 

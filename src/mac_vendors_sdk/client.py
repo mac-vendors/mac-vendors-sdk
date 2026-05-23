@@ -26,7 +26,10 @@ from .models import (
     VendorVersionItem,
 )
 
-__all__ = ["MacVendorsAPI"]
+__all__ = ["DEFAULT_BASE_URL", "MacVendorsAPI"]
+
+#: The official hosted API. The SDK targets this host; it is not configurable.
+DEFAULT_BASE_URL = "https://mac-vendors.lizardsystems.com"
 
 
 def _to_iso(value: datetime | str) -> str:
@@ -37,17 +40,21 @@ def _to_iso(value: datetime | str) -> str:
 
 
 class MacVendorsAPI:
-    """Async client for the mac-vendors REST API (``{base_url}/api/v1``).
+    """Async client for the hosted mac-vendors REST API.
+
+    The client always targets the official service
+    (``https://mac-vendors.lizardsystems.com/api/v1``); the base URL is not
+    configurable. Advanced/testing callers may inject their own
+    pre-configured ``httpx.AsyncClient``.
 
     Example:
-        async with MacVendorsAPI("https://mac-vendors.example.com", api_key="...") as api:
+        async with MacVendorsAPI(api_key="...") as api:
             result = await api.lookup("00:50:56:AA:BB:CC")
             print(result.vendor)
     """
 
     def __init__(
         self,
-        base_url: str,
         *,
         api_key: str | None = None,
         token: str | None = None,
@@ -64,7 +71,7 @@ class MacVendorsAPI:
             if token is not None:
                 headers["Authorization"] = f"Bearer {token}"
             self._client = httpx.AsyncClient(
-                base_url=f"{base_url.rstrip('/')}/api/v1",
+                base_url=f"{DEFAULT_BASE_URL}/api/v1",
                 headers=headers,
                 timeout=timeout,
             )

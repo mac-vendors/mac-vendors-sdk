@@ -50,7 +50,7 @@ async def test_api_key_header_sent(httpx_mock: HTTPXMock, api: MacVendorsAPI) ->
 
 async def test_bearer_token_header_sent(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(json={"mac": "005056AABBCC", "found": False})
-    async with MacVendorsAPI(BASE_URL, token="jwt-abc") as api:
+    async with MacVendorsAPI(token="jwt-abc") as api:
         await api.lookup("005056AABBCC")
     req = _last(httpx_mock)
     assert req.headers["Authorization"] == "Bearer jwt-abc"
@@ -59,7 +59,7 @@ async def test_bearer_token_header_sent(httpx_mock: HTTPXMock) -> None:
 
 async def test_both_credentials_sent(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(json={"mac": "X", "found": False})
-    async with MacVendorsAPI(BASE_URL, api_key="k", token="t") as api:
+    async with MacVendorsAPI(api_key="k", token="t") as api:
         await api.lookup("X")
     req = _last(httpx_mock)
     assert req.headers["X-API-Key"] == "k"
@@ -521,7 +521,7 @@ async def test_error_json_list_body(httpx_mock: HTTPXMock, api: MacVendorsAPI) -
 async def test_injected_client_not_closed(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(json={"mac": "X", "found": False})
     client = httpx.AsyncClient(base_url=f"{BASE_URL}/api/v1", headers={"X-API-Key": "k"})
-    api = MacVendorsAPI(BASE_URL, client=client)
+    api = MacVendorsAPI(client=client)
     await api.lookup("X")
     await api.aclose()
     # injected client is left open for the caller to manage
@@ -529,9 +529,14 @@ async def test_injected_client_not_closed(httpx_mock: HTTPXMock) -> None:
     await client.aclose()
 
 
-async def test_base_url_trailing_slash_stripped(httpx_mock: HTTPXMock) -> None:
+async def test_targets_pinned_host(httpx_mock: HTTPXMock, api: MacVendorsAPI) -> None:
     httpx_mock.add_response(json={"mac": "X", "found": False})
-    async with MacVendorsAPI(f"{BASE_URL}/", api_key="k") as api:
-        await api.lookup("X")
+    await api.lookup("X")
     req = _last(httpx_mock)
-    assert str(req.url) == f"{API}/lookup/X"
+    assert str(req.url) == "https://mac-vendors.lizardsystems.com/api/v1/lookup/X"
+
+
+def test_base_url_is_not_configurable() -> None:
+    # The base URL is pinned; a positional URL arg must be rejected.
+    with pytest.raises(TypeError):
+        MacVendorsAPI("https://evil.example.com", api_key="k")  # type: ignore[misc]

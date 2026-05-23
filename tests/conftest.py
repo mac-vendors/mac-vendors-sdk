@@ -8,12 +8,13 @@ import pytest
 
 from mac_vendors_sdk import MacVendorsAPI
 
-BASE_URL = "https://api.example.com"
+# The SDK pins this host; tests assert against it (HTTP is mocked, no network).
+BASE_URL = "https://mac-vendors.lizardsystems.com"
 API_KEY = "test-key-123"
 
 
 @pytest.fixture
 async def api() -> AsyncIterator[MacVendorsAPI]:
-    """A client configured with an API key against a fake base URL."""
-    async with MacVendorsAPI(BASE_URL, api_key=API_KEY) as client:
+    """A client configured with an API key (targets the pinned host)."""
+    async with MacVendorsAPI(api_key=API_KEY) as client:
         yield client

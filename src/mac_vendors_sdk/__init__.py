@@ -5,9 +5,7 @@ Example:
     from mac_vendors_sdk import MacVendorsAPI
 
     async def main() -> None:
-        async with MacVendorsAPI(
-            "https://mac-vendors.example.com", api_key="your-key"
-        ) as api:
+        async with MacVendorsAPI(api_key="your-key") as api:
             result = await api.lookup("00:50:56:AA:BB:CC")
             print(result.vendor)
 
