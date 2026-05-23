@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
 import pytest
 from pytest_httpx import HTTPXMock
@@ -101,9 +103,23 @@ async def test_lookup_as_of_datetime(httpx_mock: HTTPXMock, api: MacVendorsAPI) 
     from datetime import datetime
 
     httpx_mock.add_response(json={"mac": "005056AABBCC", "found": False})
+    # A naive datetime is assumed to be UTC and rendered with an explicit offset.
     await api.lookup("005056AABBCC", as_of=datetime(2020, 1, 1, 0, 0, 0))
     req = _last(httpx_mock)
-    assert req.url.params["as_of"] == "2020-01-01T00:00:00"
+    assert req.url.params["as_of"] == "2020-01-01T00:00:00+00:00"
+
+
+async def test_lookup_as_of_aware_datetime_converts_to_utc(
+    httpx_mock: HTTPXMock, api: MacVendorsAPI
+) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    httpx_mock.add_response(json={"mac": "005056AABBCC", "found": False})
+    # 02:00 at +02:00 == 00:00 UTC.
+    aware = datetime(2020, 1, 1, 2, 0, 0, tzinfo=timezone(timedelta(hours=2)))
+    await api.lookup("005056AABBCC", as_of=aware)
+    req = _last(httpx_mock)
+    assert req.url.params["as_of"] == "2020-01-01T00:00:00+00:00"
 
 
 async def test_lookup_history(httpx_mock: HTTPXMock, api: MacVendorsAPI) -> None:
@@ -339,8 +355,10 @@ async def test_vendor_name_with_slash(httpx_mock: HTTPXMock, api: MacVendorsAPI)
     )
     await api.vendor_assignments("A/B Corp")
     req = _last(httpx_mock)
-    # slash must be percent-encoded so it does not alter the path
-    assert "A%2FB%20Corp" in str(req.url)
+    # The server route is {name:path}: '/' stays a literal path separator (not
+    # %2F, which proxies/ASGI servers often reject); other chars are encoded.
+    assert req.url.path == "/api/v1/vendors/A/B Corp/assignments"
+    assert "%2F" not in str(req.url)
 
 
 async def test_countries(httpx_mock: HTTPXMock, api: MacVendorsAPI) -> None:
@@ -479,11 +497,28 @@ async def test_rate_limit_429_without_retry_after(
     assert exc_info.value.retry_after is None
 
 
-async def test_rate_limit_429_bad_retry_after(httpx_mock: HTTPXMock, api: MacVendorsAPI) -> None:
+async def test_rate_limit_429_http_date_retry_after(
+    httpx_mock: HTTPXMock, api: MacVendorsAPI
+) -> None:
+    # Retry-After as an HTTP-date (far future) is parsed into a positive seconds value.
     httpx_mock.add_response(
         status_code=429,
         json={"detail": "slow down"},
-        headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"},
+        headers={"Retry-After": "Wed, 21 Oct 2099 07:28:00 GMT"},
+    )
+    with pytest.raises(RateLimitError) as exc_info:
+        await api.lookup("005056AABBCC")
+    assert exc_info.value.retry_after is not None
+    assert exc_info.value.retry_after > 0
+
+
+async def test_rate_limit_429_unparseable_retry_after(
+    httpx_mock: HTTPXMock, api: MacVendorsAPI
+) -> None:
+    httpx_mock.add_response(
+        status_code=429,
+        json={"detail": "slow down"},
+        headers={"Retry-After": "soon-ish"},
     )
     with pytest.raises(RateLimitError) as exc_info:
         await api.lookup("005056AABBCC")
@@ -527,6 +562,35 @@ async def test_injected_client_not_closed(httpx_mock: HTTPXMock) -> None:
     # injected client is left open for the caller to manage
     assert not client.is_closed
     await client.aclose()
+
+
+async def test_owned_client_is_closed_on_exit(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(json={"mac": "X", "found": False})
+    async with MacVendorsAPI(api_key="k") as api:
+        await api.lookup("X")
+        inner = api._client
+    assert inner.is_closed  # an owned client is closed by __aexit__
+
+
+async def test_injected_client_with_credentials_raises() -> None:
+    client = httpx.AsyncClient(base_url=f"{BASE_URL}/api/v1")
+    with pytest.raises(ValueError, match="not both"):
+        MacVendorsAPI(api_key="k", client=client)
+    await client.aclose()
+
+
+async def test_download_error_preserves_existing_file(
+    httpx_mock: HTTPXMock, api: MacVendorsAPI, tmp_path: Path
+) -> None:
+    dest = tmp_path / "vendors.sqlite"
+    dest.write_bytes(b"OLD-GOOD-DATA")
+    httpx_mock.add_response(status_code=404, json={"detail": "no such export"})
+    with pytest.raises(MacVendorsApiError):
+        await api.download_export("sqlite", dest)
+    # The pre-existing file is untouched and no .part temp file is left behind.
+    assert dest.read_bytes() == b"OLD-GOOD-DATA"
+    assert list(tmp_path.glob("*.part")) == []
+    assert list(tmp_path.glob(".*")) == []
 
 
 async def test_targets_pinned_host(httpx_mock: HTTPXMock, api: MacVendorsAPI) -> None:

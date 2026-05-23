@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import os
+import tempfile
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -33,10 +36,34 @@ DEFAULT_BASE_URL = "https://mac-vendors.lizardsystems.com"
 
 
 def _to_iso(value: datetime | str) -> str:
-    """Render an ``as_of`` parameter as an ISO 8601 string."""
+    """Render an ``as_of`` parameter as a UTC ISO 8601 string.
+
+    A naive datetime is assumed to be UTC; an aware datetime is converted to
+    UTC, so point-in-time queries are never silently shifted by the caller's
+    local offset. A string is passed through unchanged.
+    """
     if isinstance(value, datetime):
-        return value.isoformat()
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
     return value
+
+
+def _parse_retry_after(raw: str | None) -> int | None:
+    """Parse a Retry-After header (delta-seconds or HTTP-date) into seconds."""
+    if raw is None:
+        return None
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0, int((when - datetime.now(timezone.utc)).total_seconds()))
 
 
 class MacVendorsAPI:
@@ -61,8 +88,14 @@ class MacVendorsAPI:
         timeout: float = 30.0,
         client: httpx.AsyncClient | None = None,
     ) -> None:
+        self._timeout = timeout
         self._owns_client = client is None
         if client is not None:
+            if api_key is not None or token is not None:
+                raise ValueError(
+                    "Pass api_key/token OR an injected client (with its own auth "
+                    "headers), not both - credentials are ignored on an injected client."
+                )
             self._client = client
         else:
             headers: dict[str, str] = {}
@@ -116,12 +149,7 @@ class MacVendorsAPI:
         if status == 404:
             raise NotFoundError(status, detail, response)
         if status == 429:
-            retry_after_raw = response.headers.get("Retry-After")
-            retry_after: int | None
-            try:
-                retry_after = int(retry_after_raw) if retry_after_raw is not None else None
-            except ValueError:
-                retry_after = None
+            retry_after = _parse_retry_after(response.headers.get("Retry-After"))
             raise RateLimitError(status, detail, response, retry_after=retry_after)
         raise MacVendorsApiError(status, detail, response)
 
@@ -207,19 +235,19 @@ class MacVendorsAPI:
 
     async def vendor_assignments(self, name: str) -> VendorAssignmentsResponse:
         """Get all assignments for a vendor (GET /vendors/{name}/assignments)."""
-        data = await self._request_json("GET", f"/vendors/{quote(name, safe='')}/assignments")
+        data = await self._request_json("GET", f"/vendors/{quote(name, safe='/')}/assignments")
         return VendorAssignmentsResponse.model_validate(data)
 
     async def vendor_history(self, name: str) -> VendorHistory:
         """Get the SCD2 history for a vendor (GET /vendors/{name}/history)."""
-        data = await self._request_json("GET", f"/vendors/{quote(name, safe='')}/history")
+        data = await self._request_json("GET", f"/vendors/{quote(name, safe='/')}/history")
         return VendorHistory.model_validate(data)
 
     async def vendor_at(self, name: str, *, as_of: datetime | str) -> VendorVersionItem:
         """Get the vendor version current at a point in time (GET /vendors/{name}/at)."""
         data = await self._request_json(
             "GET",
-            f"/vendors/{quote(name, safe='')}/at",
+            f"/vendors/{quote(name, safe='/')}/at",
             params={"as_of": _to_iso(as_of)},
         )
         return VendorVersionItem.model_validate(data)
@@ -242,21 +270,39 @@ class MacVendorsAPI:
         return ExportListResponse.model_validate(data)
 
     async def download_export(self, format: str, dest: str | Path) -> Path:
-        """Download a pre-generated export to ``dest``.
+        """Download a pre-generated export to ``dest`` atomically.
 
-        Streams the binary response (GET /export/{format}/download) to disk and
-        returns the destination path. Raises a typed error on a non-2xx response.
+        Streams the binary response (GET /export/{format}/download) to a
+        temporary file in the destination directory and renames it into place
+        only on full success, so an interrupted download never leaves a partial
+        file at ``dest`` nor destroys an existing file there. Raises a typed
+        error on a non-2xx response.
         """
         dest_path = Path(dest)
-        async with self._client.stream(
-            "GET",
-            f"/export/{quote(format, safe='')}/download",
-            follow_redirects=True,
-        ) as response:
-            if not response.is_success:
-                await response.aread()
-                self._raise_for_status(response)
-            with dest_path.open("wb") as fh:
-                async for chunk in response.aiter_bytes():
-                    fh.write(chunk)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=dest_path.parent, prefix=f".{dest_path.name}.", suffix=".part"
+        )
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        # Large exports may stream slowly; don't let the default read timeout
+        # abort a legitimately long download.
+        timeout = httpx.Timeout(self._timeout, read=None)
+        try:
+            async with self._client.stream(
+                "GET",
+                f"/export/{quote(format, safe='')}/download",
+                follow_redirects=True,
+                timeout=timeout,
+            ) as response:
+                if not response.is_success:
+                    await response.aread()
+                    self._raise_for_status(response)
+                with tmp_path.open("wb") as fh:
+                    async for chunk in response.aiter_bytes():
+                        fh.write(chunk)
+            os.replace(tmp_path, dest_path)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
         return dest_path

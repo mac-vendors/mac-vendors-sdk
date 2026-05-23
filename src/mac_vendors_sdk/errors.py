@@ -48,8 +48,8 @@ class RateLimitError(MacVendorsApiError):
     """Raised for 429 responses.
 
     Attributes:
-        retry_after: Value of the ``Retry-After`` header as an int (seconds),
-            or ``None`` when the header was absent or not an integer.
+        retry_after: Seconds to wait, parsed from the ``Retry-After`` header
+            (delta-seconds or an HTTP-date), or ``None`` when absent/unparseable.
     """
 
     def __init__(
