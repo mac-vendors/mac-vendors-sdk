@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Async HTTP client SDK for the mac-vendors public REST API"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 authors = [
     { name = "LizardSystems", email = "support@lizardsystems.com" }
 ]
@@ -28,9 +28,8 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: System :: Networking",
     "Typing :: Typed",
 ]
@@ -57,7 +56,7 @@ Repository = "https://github.com/mac-vendors/mac-vendors-sdk.git"
 packages = ["src/mac_vendors_sdk"]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py312"
 line-length = 100
 src = ["src"]
 
@@ -69,7 +68,7 @@ ignore = ["E501"]
 known-first-party = ["mac_vendors_sdk"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_ignores = true
