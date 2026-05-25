@@ -50,8 +50,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/lizardsystems/mac-vendors-sdk"
-Repository = "https://github.com/lizardsystems/mac-vendors-sdk.git"
+Homepage = "https://github.com/mac-vendors/mac-vendors-sdk"
+Repository = "https://github.com/mac-vendors/mac-vendors-sdk.git"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mac_vendors_sdk"]
