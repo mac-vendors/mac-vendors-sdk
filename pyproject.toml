@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mac-vendors-sdk"
 version = "0.1.0"
-description = "Async HTTP client SDK for the mac-vendors public REST API"
+description = "Async HTTP client SDK for the MAC Vendors public REST API"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"

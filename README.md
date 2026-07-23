@@ -1,6 +1,6 @@
 # mac-vendors-sdk
 
-Async HTTP client SDK for the [mac-vendors](https://github.com/mac-vendors) public REST API.
+Async HTTP client SDK for the [MAC Vendors](https://mac-vendors.lizardsystems.com) public REST API.
 
 It is a thin, typed wrapper over the hosted service at
 `https://mac-vendors.lizardsystems.com/api/v1`. The base URL is fixed (not
