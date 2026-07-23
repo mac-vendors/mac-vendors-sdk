@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from types import TracebackType
@@ -44,8 +44,8 @@ def _to_iso(value: datetime | str) -> str:
     """
     if isinstance(value, datetime):
         if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc).isoformat()
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC).isoformat()
     return value
 
 
@@ -62,8 +62,8 @@ def _parse_retry_after(raw: str | None) -> int | None:
     except (TypeError, ValueError):
         return None
     if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    return max(0, int((when - datetime.now(timezone.utc)).total_seconds()))
+        when = when.replace(tzinfo=UTC)
+    return max(0, int((when - datetime.now(UTC)).total_seconds()))
 
 
 class MacVendorsAPI:
