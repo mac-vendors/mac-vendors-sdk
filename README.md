@@ -1,5 +1,10 @@
 # mac-vendors-sdk
 
+[![PyPI](https://img.shields.io/pypi/v/mac-vendors-sdk.svg)](https://pypi.org/project/mac-vendors-sdk/)
+[![Python versions](https://img.shields.io/pypi/pyversions/mac-vendors-sdk.svg)](https://pypi.org/project/mac-vendors-sdk/)
+[![CI](https://github.com/mac-vendors/mac-vendors-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/mac-vendors/mac-vendors-sdk/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Async HTTP client SDK for the [MAC Vendors](https://mac-vendors.lizardsystems.com) public REST API.
 
 It is a thin, typed wrapper over the hosted service at
