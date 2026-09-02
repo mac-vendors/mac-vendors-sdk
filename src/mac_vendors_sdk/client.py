@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from types import TracebackType
@@ -17,8 +17,10 @@ from .errors import AuthError, MacVendorsApiError, NotFoundError, RateLimitError
 from .models import (
     BatchLookupResponse,
     CountryItem,
+    DatabaseInfoResponse,
     DatabaseStatsResponse,
     ExportListResponse,
+    HealthResponse,
     MacHistory,
     TopVendorItem,
     VendorAssignmentsResponse,
@@ -29,10 +31,44 @@ from .models import (
     VendorVersionItem,
 )
 
-__all__ = ["DEFAULT_BASE_URL", "MacVendorsAPI"]
+__all__ = ["DEFAULT_BASE_URL", "EXPORT_FORMATS", "MacVendorsAPI"]
 
 #: The official hosted API. The SDK targets this host; it is not configurable.
 DEFAULT_BASE_URL = "https://mac-vendors.lizardsystems.com"
+
+#: Where the versioned API lives under the host. ``/health`` sits outside it.
+_API_PREFIX = "/api/v1"
+
+#: The export formats this release knows about, for building a picker or
+#: validating input offline. A reference snapshot, not a gate: the SDK does not
+#: check against it, so a format added server-side works before this list
+#: catches up. :meth:`MacVendorsAPI.list_exports` is the authoritative,
+#: per-plan answer.
+EXPORT_FORMATS: tuple[str, ...] = (
+    "sqlite",
+    "csv",
+    "json",
+    "wireshark",
+    "wireshark_legacy",
+    "nmap",
+    "ieee_oui_txt",
+    "sqlite_zip",
+    "csv_zip",
+    "json_zip",
+    "wireshark_zip",
+    "wireshark_legacy_zip",
+    "nmap_zip",
+    "ieee_oui_txt_zip",
+    "csv_history",
+    "sqlite_history",
+    "csv_history_zip",
+    "sqlite_history_zip",
+)
+
+#: Read and written a megabyte at a time. Exports run to gigabytes, and the
+#: default buffer would turn one into six figures' worth of blocking writes on
+#: the caller's event loop.
+_DOWNLOAD_CHUNK_SIZE = 1 << 20
 
 
 def _to_iso(value: datetime | str) -> str:
@@ -46,6 +82,21 @@ def _to_iso(value: datetime | str) -> str:
         if value.tzinfo is None:
             value = value.replace(tzinfo=UTC)
         return value.astimezone(UTC).isoformat()
+    return value
+
+
+def _to_date(value: date | datetime | str) -> str:
+    """Render a calendar-date parameter as ``YYYY-MM-DD``.
+
+    A datetime goes through :func:`_to_iso` first, so the date taken is the UTC
+    one: an aware datetime near midnight otherwise contributes its *local*
+    calendar date and the snapshot silently shifts by a day. A plain date has no
+    offset to reconcile, and a string is passed through unchanged.
+    """
+    if isinstance(value, datetime):
+        return _to_iso(value)[:10]
+    if isinstance(value, date):
+        return value.isoformat()
     return value
 
 
@@ -104,10 +155,14 @@ class MacVendorsAPI:
             if token is not None:
                 headers["Authorization"] = f"Bearer {token}"
             self._client = httpx.AsyncClient(
-                base_url=f"{DEFAULT_BASE_URL}/api/v1",
+                base_url=f"{DEFAULT_BASE_URL}{_API_PREFIX}",
                 headers=headers,
                 timeout=timeout,
             )
+        # `/health` sits outside the versioned prefix. Derived once, from
+        # whatever base URL the client ended up with, so the layout is composed
+        # in one place rather than composed here and picked apart per call.
+        self._root_url = self._client.base_url.join("/")
 
     # --- lifecycle -------------------------------------------------------
 
@@ -165,6 +220,55 @@ class MacVendorsAPI:
         self._raise_for_status(response)
         return response.json()
 
+    async def _download(
+        self,
+        url: str,
+        dest: str | Path,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> Path:
+        """Stream a binary response to ``dest``, replacing it only on success.
+
+        The binary counterpart to :meth:`_request_json`: same client, same error
+        mapping, but the body goes to a file instead of being parsed. Written to
+        a temporary file in the destination directory and renamed into place
+        only once the whole body has arrived, so an interrupted download leaves
+        neither a partial file at ``dest`` nor a damaged existing one.
+        """
+        dest_path = Path(dest)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=dest_path.parent, prefix=f".{dest_path.name}.", suffix=".part"
+        )
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        # Large exports may stream slowly; don't let the default read timeout
+        # abort a legitimately long download.
+        timeout = httpx.Timeout(self._timeout, read=None)
+        try:
+            async with self._client.stream(
+                "GET",
+                url,
+                params=params,
+                follow_redirects=True,
+                timeout=timeout,
+            ) as response:
+                if not response.is_success:
+                    await response.aread()
+                    self._raise_for_status(response)
+                # A full export runs to gigabytes, and every `write` blocks the
+                # caller's event loop. Megabyte chunks and a matching buffer keep
+                # that to a few hundred syscalls per gigabyte rather than a few
+                # hundred thousand.
+                with tmp_path.open("wb", buffering=_DOWNLOAD_CHUNK_SIZE) as fh:
+                    async for chunk in response.aiter_bytes(_DOWNLOAD_CHUNK_SIZE):
+                        fh.write(chunk)
+            os.replace(tmp_path, dest_path)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        return dest_path
+
     # --- lookup endpoints ------------------------------------------------
 
     async def lookup(
@@ -173,7 +277,12 @@ class MacVendorsAPI:
         *,
         as_of: datetime | str | None = None,
     ) -> VendorResponse:
-        """Look up the vendor for a single MAC address (GET /lookup/{mac})."""
+        """Look up the vendor for a single MAC address (GET /lookup/{mac}).
+
+        The plain current lookup is public. Passing ``as_of`` for a
+        point-in-time answer requires a plan that includes the ``history``
+        feature (Pro or Enterprise).
+        """
         params: dict[str, Any] = {}
         if as_of is not None:
             params["as_of"] = _to_iso(as_of)
@@ -183,7 +292,11 @@ class MacVendorsAPI:
         return VendorResponse.model_validate(data)
 
     async def lookup_history(self, mac: str) -> MacHistory:
-        """Get the SCD2 history for a MAC assignment (GET /lookup/{mac}/history)."""
+        """Get the SCD2 history for a MAC assignment (GET /lookup/{mac}/history).
+
+        Requires a plan that includes the ``history`` feature (Pro or
+        Enterprise) and costs one request from that plan's quota.
+        """
         data = await self._request_json("GET", f"/lookup/{quote(mac, safe='')}/history")
         return MacHistory.model_validate(data)
 
@@ -228,14 +341,46 @@ class MacVendorsAPI:
         data = await self._request_json("GET", "/vendors/top", params={"limit": limit})
         return [TopVendorItem.model_validate(item) for item in data]
 
-    async def search_vendors(self, q: str, *, limit: int = 20) -> list[VendorItem]:
-        """Search vendors by name (GET /vendors/search)."""
-        data = await self._request_json("GET", "/vendors/search", params={"q": q, "limit": limit})
+    async def search_vendors(
+        self,
+        q: str,
+        *,
+        limit: int = 20,
+        prefixes: int | None = None,
+    ) -> list[VendorItem]:
+        """Search vendors by name (GET /vendors/search).
+
+        Results are ranked best match first and each carries a *sample* of the
+        vendor's prefixes plus ``assignment_count``, the true total. ``prefixes``
+        sets how many to sample per vendor (server default 4, max 20); rows count
+        against the daily directory budget, so raising it multiplies the cost of
+        the call. Left unset, the server's default applies.
+        """
+        params: dict[str, Any] = {"q": q, "limit": limit}
+        if prefixes is not None:
+            params["prefixes"] = prefixes
+        data = await self._request_json("GET", "/vendors/search", params=params)
         return [VendorItem.model_validate(item) for item in data]
 
-    async def vendor_assignments(self, name: str) -> VendorAssignmentsResponse:
-        """Get all assignments for a vendor (GET /vendors/{name}/assignments)."""
-        data = await self._request_json("GET", f"/vendors/{quote(name, safe='/')}/assignments")
+    async def vendor_assignments(
+        self,
+        name: str,
+        *,
+        page: int = 1,
+        page_size: int | None = None,
+    ) -> VendorAssignmentsResponse:
+        """Get a page of a vendor's assignments (GET /vendors/{name}/assignments).
+
+        ``total_assignments`` is the vendor's whole holding and ``truncated``
+        says whether this page is all of it; the rest is reachable with ``page``.
+        ``page_size`` defaults server-side to the 2000 maximum.
+        """
+        params: dict[str, Any] = {"page": page}
+        if page_size is not None:
+            params["page_size"] = page_size
+        data = await self._request_json(
+            "GET", f"/vendors/{quote(name, safe='/')}/assignments", params=params
+        )
         return VendorAssignmentsResponse.model_validate(data)
 
     async def vendor_history(self, name: str) -> VendorHistory:
@@ -258,9 +403,35 @@ class MacVendorsAPI:
         return [CountryItem.model_validate(item) for item in data]
 
     async def database_stats(self) -> DatabaseStatsResponse:
-        """Get database statistics (GET /database/stats)."""
+        """Get database statistics (GET /database/stats).
+
+        A strict subset of :meth:`database_info`, kept for callers that only
+        need the per-registry vendor counts.
+        """
         data = await self._request_json("GET", "/database/stats")
         return DatabaseStatsResponse.model_validate(data)
+
+    async def database_info(self) -> DatabaseInfoResponse:
+        """Get extended database information (GET /database/info).
+
+        Totals, per-registry breakdowns of both assignment blocks and unique
+        organizations, and the ten most recent additions, changes and removals.
+        The server caches this for an hour.
+        """
+        data = await self._request_json("GET", "/database/info")
+        return DatabaseInfoResponse.model_validate(data)
+
+    # --- service ---------------------------------------------------------
+
+    async def health(self) -> HealthResponse:
+        """Check service health (GET /health).
+
+        The only endpoint outside the versioned prefix, so it is addressed
+        against :attr:`_root_url` rather than relative to the client's base URL.
+        Unauthenticated: it answers without an API key.
+        """
+        data = await self._request_json("GET", str(self._root_url.join("health")))
+        return HealthResponse.model_validate(data)
 
     # --- export endpoints ------------------------------------------------
 
@@ -277,32 +448,32 @@ class MacVendorsAPI:
         only on full success, so an interrupted download never leaves a partial
         file at ``dest`` nor destroys an existing file there. Raises a typed
         error on a non-2xx response.
+
+        ``format`` is one of :data:`EXPORT_FORMATS`; an unknown one is a 404.
+        Each format is gated by a plan feature - :meth:`list_exports` reports
+        which ones the current credentials may download.
         """
-        dest_path = Path(dest)
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(
-            dir=dest_path.parent, prefix=f".{dest_path.name}.", suffix=".part"
+        return await self._download(f"/export/{quote(format, safe='')}/download", dest)
+
+    async def download_export_as_of(
+        self,
+        as_of: date | datetime | str,
+        dest: str | Path,
+        *,
+        format: str = "csv",
+    ) -> Path:
+        """Download a point-in-time export to ``dest`` (GET /export/as-of).
+
+        The database as it looked on a past date, generated on demand. Requires
+        a plan with the ``export_asof`` feature (Enterprise); the date must be
+        in the past, and ``format`` is ``"csv"`` or ``"sqlite"``. Snapshots are
+        immutable, so the server caches them and a cache hit does not count
+        against the daily cap.
+
+        ``as_of`` is a calendar date: a ``datetime`` contributes its UTC date,
+        like every other point-in-time parameter here, and a string is passed
+        through as given.
+        """
+        return await self._download(
+            "/export/as-of", dest, params={"date": _to_date(as_of), "format": format}
         )
-        os.close(fd)
-        tmp_path = Path(tmp_name)
-        # Large exports may stream slowly; don't let the default read timeout
-        # abort a legitimately long download.
-        timeout = httpx.Timeout(self._timeout, read=None)
-        try:
-            async with self._client.stream(
-                "GET",
-                f"/export/{quote(format, safe='')}/download",
-                follow_redirects=True,
-                timeout=timeout,
-            ) as response:
-                if not response.is_success:
-                    await response.aread()
-                    self._raise_for_status(response)
-                with tmp_path.open("wb") as fh:
-                    async for chunk in response.aiter_bytes():
-                        fh.write(chunk)
-            os.replace(tmp_path, dest_path)
-        except BaseException:
-            tmp_path.unlink(missing_ok=True)
-            raise
-        return dest_path

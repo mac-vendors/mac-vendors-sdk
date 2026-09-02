@@ -13,9 +13,12 @@ from pydantic import BaseModel, ConfigDict
 __all__ = [
     "BatchLookupResponse",
     "CountryItem",
+    "DatabaseInfoRecord",
+    "DatabaseInfoResponse",
     "DatabaseStatsResponse",
     "ExportItem",
     "ExportListResponse",
+    "HealthResponse",
     "MacHistory",
     "MacHistoryItem",
     "PaginationMeta",
@@ -89,6 +92,11 @@ class VendorItem(_Base):
     organization_address: str | None = None
     registry: str
     valid_from: datetime | None = None
+    #: Total prefixes the organization holds. Present on
+    #: :meth:`MacVendorsAPI.search_vendors` results, which carry only a sample
+    #: of each vendor's prefixes; ``None`` elsewhere, where the rows are the
+    #: whole set.
+    assignment_count: int | None = None
 
 
 class PaginationMeta(_Base):
@@ -124,11 +132,15 @@ class VendorAssignmentItem(_Base):
 
     assignment: str
     registry: str
+    #: When this prefix first appeared in the registry, across every version of
+    #: the record - unlike ``valid_from``, which is when the current version
+    #: began.
+    first_registered: datetime | None = None
     valid_from: datetime | None = None
 
 
 class VendorAssignmentsResponse(_Base):
-    """All assignments for a vendor (GET /vendors/{name}/assignments)."""
+    """One page of a vendor's assignments (GET /vendors/{name}/assignments)."""
 
     organization_name: str
     organization_address: str | None = None
@@ -136,6 +148,9 @@ class VendorAssignmentsResponse(_Base):
     total_assignments: int
     registries: list[str] = []
     assignments: list[VendorAssignmentItem]
+    #: True when this page does not carry every assignment the vendor holds;
+    #: use ``page`` to reach the rest.
+    truncated: bool = False
 
 
 class VendorVersionItem(_Base):
@@ -150,19 +165,34 @@ class VendorVersionItem(_Base):
     country_code: str | None = None
     assignment_count: int
     registries: list[str] = []
-    first_seen: datetime | None = None
-    last_seen: datetime | None = None
     valid_from: datetime
     valid_to: datetime | None = None
     is_current: bool
 
 
 class VendorHistory(_Base):
-    """Full SCD2 history of a vendor (GET /vendors/{name}/history)."""
+    """SCD2 history of a vendor (GET /vendors/{name}/history).
+
+    ``versions`` is ordered oldest first. Without a plan that includes the
+    ``history`` feature the API returns only the current version, sets
+    ``truncated``, and still reports the true ``total_versions``.
+    """
 
     organization_name: str
+    #: When the oldest prefix this vendor holds first appeared in the registry.
+    #: A property of the vendor rather than of any one version, which is why it
+    #: sits here and not on :class:`VendorVersionItem`.
+    first_seen: datetime | None = None
+    #: When the newest prefix this vendor holds first appeared in the registry.
+    last_seen: datetime | None = None
     total_versions: int
     versions: list[VendorVersionItem]
+    #: True when the caller's plan lacks the ``history`` feature and only the
+    #: current version was returned. Unlike
+    #: :attr:`VendorAssignmentsResponse.truncated`, which is about paging, no
+    #: page number reaches the withheld versions - the API name is shared, the
+    #: remedy is not.
+    truncated: bool = False
 
 
 class CountryItem(_Base):
@@ -189,6 +219,36 @@ class DatabaseStatsResponse(_Base):
     last_update: datetime | None = None
 
 
+class DatabaseInfoRecord(_Base):
+    """An assignment block in one of the recent-activity feeds."""
+
+    assignment: str
+    organization_name: str | None = None
+    registry: str
+    #: ``valid_from`` for added and changed blocks, ``valid_to`` for removed ones.
+    date: datetime | None = None
+
+
+class DatabaseInfoResponse(_Base):
+    """Extended database information (GET /database/info).
+
+    Totals, per-registry breakdowns of both assignment blocks and unique
+    organizations, and up to ten most recent additions, changes and removals.
+    """
+
+    total_blocks: int
+    unique_vendors: int
+    last_updated: datetime | None = None
+    first_updated: datetime | None = None
+    total_updates: int
+    database_version: str
+    records_by_registry: dict[str, int]
+    vendors_by_registry: dict[str, int]
+    recently_added: list[DatabaseInfoRecord] = []
+    recently_changed: list[DatabaseInfoRecord] = []
+    recently_removed: list[DatabaseInfoRecord] = []
+
+
 # --- export module -------------------------------------------------------
 
 
@@ -210,3 +270,16 @@ class ExportListResponse(_Base):
     """Available exports (GET /export)."""
 
     items: list[ExportItem]
+    #: Whether the current plan may use point-in-time (as-of) exports.
+    asof_allowed: bool = False
+
+
+# --- service -------------------------------------------------------------
+
+
+class HealthResponse(_Base):
+    """Service health (GET /health)."""
+
+    status: str
+    version: str | None = None
+    environment: str | None = None

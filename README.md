@@ -38,6 +38,7 @@ api = MacVendorsAPI(token="your-jwt")
 import asyncio
 from mac_vendors_sdk import MacVendorsAPI
 
+
 async def main() -> None:
     async with MacVendorsAPI(api_key="key") as api:
         # Single lookup
@@ -47,7 +48,7 @@ async def main() -> None:
         # Historical lookup
         old = await api.lookup("005056AABBCC", as_of="2020-01-01T00:00:00Z")
 
-        # MAC assignment history
+        # MAC assignment history (requires a plan with the history feature)
         history = await api.lookup_history("00:50:56:AA:BB:CC")
 
         # Batch lookup (requires a plan with the batch_lookup feature)
@@ -55,24 +56,52 @@ async def main() -> None:
 
         # List / search vendors
         page = await api.list_vendors(name="VMware", page=1, page_size=50)
-        matches = await api.search_vendors("apple", limit=10)
+        matches = await api.search_vendors("apple", limit=10, prefixes=4)
         top = await api.top_vendors(limit=15)
 
         # Vendor detail / history / point-in-time
-        assignments = await api.vendor_assignments("VMware, Inc.")
+        assignments = await api.vendor_assignments("VMware, Inc.", page=1)
+        if assignments.truncated:
+            more = await api.vendor_assignments("VMware, Inc.", page=2)
         vhist = await api.vendor_history("VMware, Inc.")
         version = await api.vendor_at("VMware, Inc.", as_of="2022-06-01T00:00:00Z")
 
         # Reference data and stats
         countries = await api.countries()
         stats = await api.database_stats()
+        info = await api.database_info()
+        alive = await api.health()
 
         # Exports
         exports = await api.list_exports()
         await api.download_export("sqlite", "vendors.sqlite")
 
+        # Point-in-time export (requires a plan with the export_asof feature)
+        if exports.asof_allowed:
+            await api.download_export_as_of("2025-01-01", "vendors-2025.csv")
+
+
 asyncio.run(main())
 ```
+
+### Plan-gated endpoints
+
+Some calls need a subscription feature and raise `AuthError` (403) without it:
+`lookup(as_of=...)`, `lookup_history`, `vendor_at` and the full
+`vendor_history` timeline need `history`; `batch_lookup` needs `batch_lookup`;
+each export format needs its own feature, and `download_export_as_of` needs
+`export_asof`. `list_exports()` reports per-format `allowed` and `asof_allowed`
+so you can check before calling.
+
+`vendor_history` is trimmed rather than refused without `history`: it returns
+only the current version, sets `truncated`, and still reports the true
+`total_versions`.
+
+### Export formats
+
+`download_export` accepts any identifier in `EXPORT_FORMATS`: `sqlite`, `csv`,
+`json`, `wireshark`, `wireshark_legacy`, `nmap`, `ieee_oui_txt`, the
+`csv_history` / `sqlite_history` SCD-2 dumps, and a `_zip` variant of each.
 
 ## Errors
 

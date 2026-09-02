@@ -17,7 +17,7 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _version
 
-from .client import MacVendorsAPI
+from .client import DEFAULT_BASE_URL, EXPORT_FORMATS, MacVendorsAPI
 from .errors import (
     AuthError,
     MacVendorsApiError,
@@ -27,9 +27,12 @@ from .errors import (
 from .models import (
     BatchLookupResponse,
     CountryItem,
+    DatabaseInfoRecord,
+    DatabaseInfoResponse,
     DatabaseStatsResponse,
     ExportItem,
     ExportListResponse,
+    HealthResponse,
     MacHistory,
     MacHistoryItem,
     PaginationMeta,
@@ -50,12 +53,17 @@ except PackageNotFoundError:  # pragma: no cover - not installed (source tree)
     __version__ = "0.0.0"
 
 __all__ = [
+    "DEFAULT_BASE_URL",
+    "EXPORT_FORMATS",
     "AuthError",
     "BatchLookupResponse",
     "CountryItem",
+    "DatabaseInfoRecord",
+    "DatabaseInfoResponse",
     "DatabaseStatsResponse",
     "ExportItem",
     "ExportListResponse",
+    "HealthResponse",
     "MacHistory",
     "MacHistoryItem",
     "MacVendorsAPI",

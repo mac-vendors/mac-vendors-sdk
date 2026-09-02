@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -9,11 +10,14 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 from mac_vendors_sdk import (
+    EXPORT_FORMATS,
     AuthError,
     BatchLookupResponse,
     CountryItem,
+    DatabaseInfoResponse,
     DatabaseStatsResponse,
     ExportListResponse,
+    HealthResponse,
     MacHistory,
     MacVendorsAPI,
     MacVendorsApiError,
@@ -288,7 +292,7 @@ async def test_vendor_assignments(httpx_mock: HTTPXMock, api: MacVendorsAPI) -> 
     httpx_mock.add_response(json=payload)
     result = await api.vendor_assignments("VMware, Inc.")
     req = _last(httpx_mock)
-    assert str(req.url) == f"{API}/vendors/VMware%2C%20Inc./assignments"
+    assert str(req.url) == f"{API}/vendors/VMware%2C%20Inc./assignments?page=1"
     assert isinstance(result, VendorAssignmentsResponse)
     assert result.total_assignments == 2
     assert len(result.assignments) == 2
@@ -604,3 +608,278 @@ def test_base_url_is_not_configurable() -> None:
     # The base URL is pinned; a positional URL arg must be rejected.
     with pytest.raises(TypeError):
         MacVendorsAPI("https://evil.example.com", api_key="k")  # type: ignore[misc]
+
+
+# --- 2.0 additions: search / assignment paging ----------------------------
+
+
+async def test_search_vendors_prefixes(httpx_mock: HTTPXMock, api: MacVendorsAPI) -> None:
+    payload = [
+        {
+            "assignment": "005056",
+            "organization_name": "VMware, Inc.",
+            "registry": "MA-L",
+            "assignment_count": 4,
+        }
+    ]
+    httpx_mock.add_response(json=payload)
+    result = await api.search_vendors("vmware", limit=5, prefixes=2)
+    req = _last(httpx_mock)
+    assert req.url.params["prefixes"] == "2"
+    # The sample is what came back; assignment_count is the vendor's true total.
+    assert len(result) == 1
+    assert result[0].assignment_count == 4
+
+
+async def test_search_vendors_omits_prefixes_by_default(
+    httpx_mock: HTTPXMock, api: MacVendorsAPI
+) -> None:
+    httpx_mock.add_response(json=[])
+    await api.search_vendors("vmware")
+    req = _last(httpx_mock)
+    # Left out entirely rather than guessed at, so the server's default applies.
+    assert "prefixes" not in req.url.params
+    assert req.url.params["limit"] == "20"
+
+
+async def test_vendor_assignments_paging(httpx_mock: HTTPXMock, api: MacVendorsAPI) -> None:
+    payload = {
+        "organization_name": "Apple, Inc.",
+        "total_assignments": 2500,
+        "registries": ["MA-L"],
+        "assignments": [
+            {
+                "assignment": "005056",
+                "registry": "MA-L",
+                "first_registered": "2010-05-04T00:00:00",
+                "valid_from": "2024-01-01T00:00:00",
+            }
+        ],
+        "truncated": True,
+    }
+    httpx_mock.add_response(json=payload)
+    result = await api.vendor_assignments("Apple, Inc.", page=2, page_size=1000)
+    req = _last(httpx_mock)
+    assert req.url.params["page"] == "2"
+    assert req.url.params["page_size"] == "1000"
+    assert result.truncated is True
+    assert result.total_assignments == 2500
+    # first_registered is when the prefix entered the registry, which is not
+    # valid_from - the start of the record's current version.
+    assert result.assignments[0].first_registered == datetime(2010, 5, 4)
+    assert result.assignments[0].valid_from == datetime(2024, 1, 1)
+
+
+async def test_vendor_assignments_defaults_omit_page_size(
+    httpx_mock: HTTPXMock, api: MacVendorsAPI
+) -> None:
+    httpx_mock.add_response(
+        json={
+            "organization_name": "VMware, Inc.",
+            "total_assignments": 1,
+            "assignments": [{"assignment": "005056", "registry": "MA-L"}],
+        }
+    )
+    result = await api.vendor_assignments("VMware, Inc.")
+    req = _last(httpx_mock)
+    assert req.url.params["page"] == "1"
+    assert "page_size" not in req.url.params
+    # Absent in the payload, and the API only sets it when a page is short.
+    assert result.truncated is False
+
+
+async def test_vendor_history_trimmed_without_history_feature(
+    httpx_mock: HTTPXMock, api: MacVendorsAPI
+) -> None:
+    payload = {
+        "organization_name": "VMware, Inc.",
+        "first_seen": "1998-03-01T00:00:00",
+        "last_seen": "2024-01-01T00:00:00",
+        "total_versions": 4,
+        "versions": [
+            {
+                "organization_name": "VMware, Inc.",
+                "assignment_count": 12,
+                "registries": ["MA-L"],
+                "valid_from": "2024-01-01T00:00:00",
+                "valid_to": None,
+                "is_current": True,
+            }
+        ],
+        "truncated": True,
+    }
+    httpx_mock.add_response(json=payload)
+    result = await api.vendor_history("VMware, Inc.")
+    assert isinstance(result, VendorHistory)
+    # The true count survives the trim; only the list is shortened.
+    assert result.total_versions == 4
+    assert len(result.versions) == 1
+    assert result.truncated is True
+    # Vendor-level dates live on the response, not on a version.
+    assert result.first_seen == datetime(1998, 3, 1)
+    assert result.last_seen == datetime(2024, 1, 1)
+    assert not hasattr(result.versions[0], "first_seen")
+
+
+# --- 2.0 additions: database info and health ------------------------------
+
+
+async def test_database_info(httpx_mock: HTTPXMock, api: MacVendorsAPI) -> None:
+    payload = {
+        "total_blocks": 51234,
+        "unique_vendors": 38210,
+        "last_updated": "2026-07-20T17:21:56Z",
+        "first_updated": "2021-03-01T00:00:00Z",
+        "total_updates": 742,
+        "database_version": "1.0.0",
+        "records_by_registry": {"MA-L": 35000, "MA-M": 10000},
+        "vendors_by_registry": {"MA-L": 30000, "MA-M": 6000},
+        "recently_added": [
+            {
+                "assignment": "8C1F643A5",
+                "organization_name": "Techmovers Systems India",
+                "registry": "MA-S",
+                "date": "2026-07-20T16:01:26Z",
+            }
+        ],
+        "recently_changed": [],
+        "recently_removed": [],
+    }
+    httpx_mock.add_response(json=payload)
+    result = await api.database_info()
+    req = _last(httpx_mock)
+    assert req.url.path == "/api/v1/database/info"
+    assert isinstance(result, DatabaseInfoResponse)
+    assert result.total_blocks == 51234
+    assert result.records_by_registry["MA-L"] == 35000
+    assert result.recently_added[0].registry == "MA-S"
+    assert result.recently_removed == []
+
+
+async def test_health_is_outside_the_versioned_prefix(
+    httpx_mock: HTTPXMock, api: MacVendorsAPI
+) -> None:
+    httpx_mock.add_response(
+        json={"status": "healthy", "version": "1.2.3", "environment": "production"}
+    )
+    result = await api.health()
+    req = _last(httpx_mock)
+    # The root of the pinned host, NOT /api/v1/health.
+    assert str(req.url) == f"{BASE_URL}/health"
+    assert isinstance(result, HealthResponse)
+    assert result.status == "healthy"
+    assert result.version == "1.2.3"
+
+
+async def test_health_root_follows_an_injected_client(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(json={"status": "healthy"})
+    async with httpx.AsyncClient(base_url="https://staging.example.com/api/v1") as client:
+        async with MacVendorsAPI(client=client) as api:
+            result = await api.health()
+    req = _last(httpx_mock)
+    # Derived from the injected base URL, not from the pinned host.
+    assert str(req.url) == "https://staging.example.com/health"
+    assert result.status == "healthy"
+    # The optional fields tolerate a minimal payload.
+    assert result.version is None
+
+
+# --- 2.0 additions: as-of export ------------------------------------------
+
+
+async def test_list_exports_asof_allowed(httpx_mock: HTTPXMock, api: MacVendorsAPI) -> None:
+    httpx_mock.add_response(json={"items": [], "asof_allowed": True})
+    result = await api.list_exports()
+    assert result.asof_allowed is True
+
+
+async def test_list_exports_asof_allowed_defaults_false(
+    httpx_mock: HTTPXMock, api: MacVendorsAPI
+) -> None:
+    httpx_mock.add_response(json={"items": []})
+    result = await api.list_exports()
+    assert result.asof_allowed is False
+
+
+async def test_download_export_as_of(httpx_mock: HTTPXMock, api: MacVendorsAPI, tmp_path) -> None:
+    blob = b"assignment,organization_name\n005056,VMware\n"
+    httpx_mock.add_response(content=blob)
+    dest = tmp_path / "snapshot.csv"
+    returned = await api.download_export_as_of(date(2025, 1, 1), dest)
+    req = _last(httpx_mock)
+    assert req.url.path == "/api/v1/export/as-of"
+    assert req.url.params["date"] == "2025-01-01"
+    assert req.url.params["format"] == "csv"
+    assert req.headers["X-API-Key"] == API_KEY
+    assert returned == dest
+    assert dest.read_bytes() == blob
+
+
+async def test_download_export_as_of_sqlite(
+    httpx_mock: HTTPXMock, api: MacVendorsAPI, tmp_path
+) -> None:
+    httpx_mock.add_response(content=b"SQLite format 3\x00")
+    await api.download_export_as_of("2025-06-30", tmp_path / "snap.sqlite", format="sqlite")
+    req = _last(httpx_mock)
+    # A string is passed through as given.
+    assert req.url.params["date"] == "2025-06-30"
+    assert req.url.params["format"] == "sqlite"
+
+
+async def test_download_export_as_of_datetime_uses_the_utc_date(
+    httpx_mock: HTTPXMock, api: MacVendorsAPI, tmp_path
+) -> None:
+    httpx_mock.add_response(content=b"x")
+    # 01:00 on the 2nd at +05:00 is 20:00 on the 1st in UTC. The snapshot must
+    # follow the same UTC rule as every other point-in-time parameter, or it
+    # silently shifts by a day for callers east of Greenwich.
+    aware = datetime(2025, 1, 2, 1, 0, tzinfo=timezone(timedelta(hours=5)))
+    await api.download_export_as_of(aware, tmp_path / "snap.csv")
+    req = _last(httpx_mock)
+    assert req.url.params["date"] == "2025-01-01"
+
+
+async def test_download_export_as_of_naive_datetime_is_utc(
+    httpx_mock: HTTPXMock, api: MacVendorsAPI, tmp_path
+) -> None:
+    httpx_mock.add_response(content=b"x")
+    await api.download_export_as_of(datetime(2025, 3, 9, 23, 59), tmp_path / "snap.csv")
+    req = _last(httpx_mock)
+    assert req.url.params["date"] == "2025-03-09"
+
+
+async def test_download_export_as_of_utc_datetime(
+    httpx_mock: HTTPXMock, api: MacVendorsAPI, tmp_path
+) -> None:
+    httpx_mock.add_response(content=b"x")
+    await api.download_export_as_of(datetime(2025, 3, 9, 23, 59, tzinfo=UTC), tmp_path / "s.csv")
+    req = _last(httpx_mock)
+    assert req.url.params["date"] == "2025-03-09"
+
+
+async def test_download_export_as_of_forbidden_without_feature(
+    httpx_mock: HTTPXMock, api: MacVendorsAPI, tmp_path
+) -> None:
+    httpx_mock.add_response(
+        status_code=403,
+        json={"detail": "Your plan does not include this feature (export_asof)."},
+    )
+    dest = tmp_path / "snap.csv"
+    with pytest.raises(AuthError) as exc_info:
+        await api.download_export_as_of("2025-01-01", dest)
+    assert "export_asof" in str(exc_info.value.detail)
+    # A refused download leaves nothing behind.
+    assert not dest.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_export_formats_covers_the_documented_families() -> None:
+    # A reference snapshot, so it is checked for shape rather than pinned
+    # exactly: every base format, its zip twin, and the SCD-2 history dumps.
+    assert "sqlite" in EXPORT_FORMATS
+    assert "wireshark_legacy" in EXPORT_FORMATS
+    assert "ieee_oui_txt" in EXPORT_FORMATS
+    assert "csv_history" in EXPORT_FORMATS
+    for base in ("sqlite", "csv", "json", "nmap", "csv_history"):
+        assert f"{base}_zip" in EXPORT_FORMATS
+    assert len(set(EXPORT_FORMATS)) == len(EXPORT_FORMATS)
